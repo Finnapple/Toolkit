@@ -1,0 +1,15 @@
+# 1. Inspect the image
+file image.jpg
+exiftool image.jpg
+
+# 2. Check for Steghide embedded data
+steghide info image.jpg
+
+# 3. Extract hidden data
+steghide extract -sf image.jpg
+
+# 4. Read the extracted text
+cat secret.txt
+
+# 5.Stegseek for bruteforcing the passphrase
+stegseek image.jpg or stegseek image.jpg /usr/share/wordlists/rockyou.txt or your own wordlist.txt
