@@ -1,0 +1,2 @@
+# CTF Crypto Toolkit uses only the Python standard library.
+# Nothing to install - add packages here if you extend it.
