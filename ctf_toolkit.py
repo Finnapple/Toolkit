@@ -13,6 +13,7 @@ Usage:
 import base64
 import binascii
 import codecs
+import math
 import os
 import re
 import string
@@ -95,6 +96,21 @@ def to_text(data):
     return s
 
 
+KNOWN_FLAG_PREFIX = re.compile(r"(?i)(flag|ctf|htb|thm|picoctf|ctfd|hackthebox|cyber\w*|\w*ctf)")
+
+
+def flag_bonus(s):
+    """Full bonus only for well-known flag prefixes. An unknown prefix gets a small
+    bonus: a still-encrypted flag (e.g. 'qpmu{...}') also matches FLAG_RE and must not
+    look as good as a real decryption, and random junk with braces must not win."""
+    best = 0.0
+    for m in FLAG_RE.finditer(s):
+        if KNOWN_FLAG_PREFIX.fullmatch(m.group(0).split("{")[0]):
+            return 1.5
+        best = 0.5
+    return best
+
+
 def score(s):
     """How much a string looks like English / a flag. Higher is better."""
     if not s:
@@ -105,9 +121,7 @@ def score(s):
     tokens = re.findall(r"[a-z]+", s.lower())
     words = sum(1 for t in tokens if t in COMMON_WORDS)
     total = 0.5 * printable + 0.5 * alpha + 0.25 * min(words, 4)
-    if FLAG_RE.search(s):
-        total += 1.5
-    return total
+    return total + flag_bonus(s)
 
 
 def has_common_words(s):
@@ -263,10 +277,55 @@ def xor_brute(data):
 ENG_FREQ = [8.167, 1.492, 2.782, 4.253, 12.702, 2.228, 2.015, 6.094, 6.966,
             0.153, 0.772, 4.025, 2.406, 6.749, 7.507, 1.929, 0.095, 5.987,
             6.327, 9.056, 2.758, 0.978, 2.360, 0.150, 1.974, 0.074]
-COMMON_KEYS = ["key", "secret", "flag", "ctf", "password", "crypto", "admin",
-               "vigenere", "lemon", "cipher", "test", "hello", "pass", "root",
-               "hack", "hacker", "code", "enigma", "love", "abc", "a", "b"]
+COMMON_KEYS = [
+    "key", "secret", "flag", "ctf", "password", "crypto", "admin", "vigenere",
+    "lemon", "cipher", "test", "hello", "pass", "root", "hack", "hacker", "code",
+    "enigma", "love", "abc", "a", "b", "keyword", "hidden", "puzzle", "challenge",
+    "python", "linux", "kali", "cyber", "security", "random", "message", "orange",
+    "apple", "queen", "king", "shadow", "matrix", "monkey", "dragon", "master",
+    "letmein", "welcome", "picoctf", "pico", "crypt", "cryptography", "decrypt",
+    "encrypt", "attack", "dawn", "bacon", "spy", "agent", "ninja", "zebra",
+    "wonderland", "alice", "sesame", "open", "unlock", "access", "login", "user",
+    "account", "private", "public", "hash", "cracker", "winner", "player", "gamer",
+    "table", "chess", "river", "tiger", "eagle", "wolf", "fox", "stone", "silver",
+    "golden", "dark", "light", "moon", "sun", "star", "fire", "water", "earth",
+]
 _LETTERS = set(string.ascii_letters)
+_LOGF = [math.log(f / 100) for f in ENG_FREQ]
+_KEY_PENALTY = 3.0      # fitness lost per key letter - stops long keys from "overfitting"
+_SAMPLE = 400           # letters used for the key search (more adds time, not accuracy)
+
+# Common English bigrams/trigrams give a short ciphertext enough extra signal to find the key
+_BI_W = [0.0] * 676
+for _g in ("TH HE IN ER AN RE ON AT EN ND TI ES OR TE OF ED IS IT AL AR ST TO NT NG SE HA AS OU "
+           "IO LE VE CO ME DE HI RI RO IC NE EA RA CE LI CH LL BE MA SI OM UR").split():
+    _BI_W[(ord(_g[0]) - 65) * 26 + ord(_g[1]) - 65] = 0.4
+_TRI_W = [0.0] * 17576
+for _g in ("THE AND ING ENT ION HER FOR THA NTH INT ERE TIO TER EST ERS ATI HAT ATE ALL ETH HES "
+           "VER HIS OFT ITH FTH STH OTH RES ONT").split():
+    _TRI_W[((ord(_g[0]) - 65) * 26 + ord(_g[1]) - 65) * 26 + ord(_g[2]) - 65] = 1.2
+
+_WORDS = set((
+    "the and for are but not you all any can had her was one our out day get has him his how man new now "
+    "old see two way who boy did its let put say she too use that with have this will your from they know "
+    "want been good much some time very when come here just like long make many over such take than them "
+    "well were what said each which their there about would these other words could write first water "
+    "after where right think three years place sound great again still every small found those never "
+    "under might while house world below asked going large until along shall being often earth began "
+    "since study night light above paper parts young story point times heard whole white given means "
+    "music miles thing today later using money lived plain leave watch color face wood main enough plant "
+    "cover soon girl sleep body stand flag ctf key secret password crypto cipher decode encoded message "
+    "welcome congratulations hidden attack dawn meet bridge river tonight quick brown fox jumps lazy dog "
+    "hello admin user login test easy challenge solved solve answer found find keep safe share anyone "
+    "please competition contest team player round level next last only also into over then more most "
+    "both between through during before without within against another because people should really "
+    "something nothing everything inside outside open close start end begin finish hack hacker code "
+    "program computer network server data file text string number letter simple secure security "
+    "private public access token cookie session request response").split())
+_WORDS = sorted((w.upper() for w in _WORDS if len(w) >= 3), key=len, reverse=True)
+
+FLAG_PREFIXES = ["flag", "ctf", "htb", "thm", "pico", "picoctf", "ductf", "utctf", "uiuctf",
+                 "hackthebox", "cyber", "angstromctf", "csictf", "bsidessf", "wgmy"]
 
 
 def clean_key(key):
@@ -288,6 +347,10 @@ def vig_decrypt(text, key):
         else:
             out.append(ch)
     return "".join(out)
+
+
+def _letter_nums(text):
+    return [ord(c.upper()) - 65 for c in text if c in _LETTERS]
 
 
 def _ioc(columns):
@@ -331,36 +394,86 @@ def _plain_chi(nums):
                for j in range(26)) / n
 
 
-def _vig_key_for_length(nums, L):
-    key = [_best_shift(nums[i::L]) for i in range(L)]
-    plain = [(nums[i] - key[i % L]) % 26 for i in range(len(nums))]
-    return "".join(chr(65 + k) for k in key), _plain_chi(plain)
+def _fit(p):
+    """English log-likelihood-ish fitness of a list of 0..25 (higher = more English)."""
+    s = 0.0
+    for c in p:
+        s += _LOGF[c]
+    for i in range(len(p) - 1):
+        s += _BI_W[p[i] * 26 + p[i + 1]]
+    for i in range(len(p) - 2):
+        s += _TRI_W[(p[i] * 26 + p[i + 1]) * 26 + p[i + 2]]
+    return s
+
+
+def _vig_search(nums, L, fixed=None):
+    """Best key of length L: per-column frequency guess, then coordinate ascent on the whole
+    plaintext fitness. `fixed` = {position: shift} for key letters that are already known."""
+    n = len(nums)
+    fixed = fixed or {}
+    key = [fixed[i] if i in fixed else _best_shift(nums[i::L]) for i in range(L)]
+    free = [i for i in range(L) if i not in fixed]
+
+    def fitness():
+        return _fit([(nums[i] - key[i % L]) % 26 for i in range(n)])
+
+    best = fitness()
+    for _ in range(6):
+        changed = False
+        for i in free:
+            cur, bk = key[i], key[i]
+            for k in range(26):
+                if k == cur:
+                    continue
+                key[i] = k
+                f = fitness()
+                if f > best + 1e-9:
+                    best, bk = f, k
+            key[i] = bk
+            if bk != cur:
+                changed = True
+        if not changed:
+            break
+    return key, best
+
+
+def _vig_lengths(nums, max_len):
+    """Shortlist of plausible key lengths (IoC + per-column frequency analysis)."""
+    info = {}
+    for L in range(1, max_len + 1):
+        key = [_best_shift(nums[i::L]) for i in range(L)]
+        plain = [(nums[i] - key[i % L]) % 26 for i in range(len(nums))]
+        info[L] = (_plain_chi(plain), _ioc([nums[i::L] for i in range(L)]))
+    best_chi = min(v[0] for v in info.values())
+    best_ioc = max(v[1] for v in info.values())
+    picks = [next(L for L in sorted(info) if info[L][0] <= best_chi * 1.25 + 0.01),
+             next(L for L in sorted(info) if info[L][1] >= 0.9 * best_ioc)]
+    picks += sorted(info, key=lambda L: info[L][0])[:4]
+    seen, out = set(), []
+    for L in picks:
+        if L not in seen:
+            seen.add(L)
+            out.append(L)
+    return out
 
 
 def vigenere_crack(text, max_len=16, top=3):
-    """Statistical attack (Index of Coincidence + frequency analysis).
-    Returns [(key, plaintext)] best first. Works best with 50+ letters."""
-    nums = [ord(c.upper()) - 65 for c in text if c in _LETTERS]
+    """Statistical attack: Index of Coincidence + frequency analysis, refined with
+    bigram/trigram hill-climbing. Returns [(key, plaintext)] best first."""
+    nums = _letter_nums(text)
     if len(nums) < 20:
         raise DecodeError("Need at least ~20 letters to auto-crack Vigenere "
                           "(50+ works much better). Use a known key or crib instead.")
-    max_len = max(1, min(max_len, len(nums) // 8))  # keep >= 8 letters per column
-    by_len = {}
-    for L in range(1, max_len + 1):
-        key, chi = _vig_key_for_length(nums, L)
-        by_len[L] = (key, chi, _ioc([nums[i::L] for i in range(L)]))
-    best_chi = min(v[1] for v in by_len.values())
-    best_ioc = max(v[2] for v in by_len.values())
-    order = []
-    # 1) smallest length whose plaintext is almost as English-like as the best one
-    order.append(next(L for L in sorted(by_len) if by_len[L][1] <= best_chi * 1.25 + 0.01))
-    # 2) smallest length whose IoC is close to the best IoC
-    order.append(next(L for L in sorted(by_len) if by_len[L][2] >= 0.9 * best_ioc))
-    # 3) remaining lengths by plaintext quality
-    order += sorted(by_len, key=lambda L: by_len[L][1])
+    sample = nums[:_SAMPLE]
+    max_len = max(1, min(max_len, len(sample) // 6))
+    scored = []
+    for L in _vig_lengths(sample, max_len):
+        key, f = _vig_search(sample, L)
+        scored.append((f - _KEY_PENALTY * L, "".join(chr(65 + k) for k in key)))
+    scored.sort(reverse=True)
     results = []
-    for L in order:
-        key = _shortest_period(by_len[L][0])
+    for _, key in scored:
+        key = _shortest_period(key)
         if all(key != k for k, _ in results):
             results.append((key, vig_decrypt(text, key)))
         if len(results) >= top:
@@ -368,41 +481,174 @@ def vigenere_crack(text, max_len=16, top=3):
     return results
 
 
+def _crib_constraints(text):
+    """'xxxx{' in the ciphertext is probably a flag prefix. Yield (prefix, letters_before, token)."""
+    for m in re.finditer(r"([A-Za-z]{2,12})\{", text):
+        tok = m.group(1).upper()
+        off = sum(c in _LETTERS for c in text[:m.start(1)])
+        for p in FLAG_PREFIXES:
+            if len(p) == len(tok):
+                yield p.upper(), off, tok
+
+
+def vig_crib_candidates(text, max_len=12):
+    """Use the flag format (flag{ / ctf{ / picoCTF{ ...) as known plaintext to recover the key.
+    Returns [(key, plaintext, strong)]. strong=True only for dictionary keys that agree with
+    the crib; keys solved statistically are forced to produce the prefix, so the prefix alone
+    proves nothing about them."""
+    nums = _letter_nums(text)
+    res, seen = [], set()
+    for prefix, off, tok in _crib_constraints(text):
+        shifts = [(ord(tok[i]) - ord(prefix[i])) % 26 for i in range(len(prefix))]
+        for w in COMMON_KEYS:  # 1) dictionary keys that agree with the crib
+            kw = [ord(c) - 65 for c in w.upper()]
+            if all(kw[(off + i) % len(kw)] == shifts[i] for i in range(len(prefix))):
+                if w.upper() not in seen:
+                    seen.add(w.upper())
+                    res.append((w.upper(), vig_decrypt(text, w), True))
+        stat = []  # 2) unknown key: lock the known letters, solve the rest statistically
+        for L in range(1, min(max_len, max(1, len(nums) // 3)) + 1):  # >=3 letters per key letter
+            fixed, good = {}, True
+            for i, s in enumerate(shifts):
+                if fixed.setdefault((off + i) % L, s) != s:
+                    good = False
+                    break
+            if not good or len(fixed) >= len(nums):
+                continue
+            key, f = _vig_search(nums[:_SAMPLE], L, fixed)
+            stat.append((f - _KEY_PENALTY * (L - len(fixed)), "".join(chr(65 + k) for k in key)))
+        stat.sort(reverse=True)
+        for _, key in stat[:2]:
+            key = _shortest_period(key)
+            if key not in seen:
+                seen.add(key)
+                res.append((key, vig_decrypt(text, key), False))
+    return res
+
+
+def word_coverage(s):
+    """Fraction of letters that belong to common English words (substring search)."""
+    letters = "".join(c for c in s[:6000].upper() if c in string.ascii_uppercase)
+    n = len(letters)
+    if not n:
+        return 0.0
+    mark = bytearray(n)
+    for w in _WORDS:
+        i = letters.find(w)
+        while i != -1:
+            mark[i:i + len(w)] = b"\x01" * len(w)
+            i = letters.find(w, i + 1)
+    return sum(mark) / n
+
+
+def eng_quality(s):
+    """Higher = more like English. Independent of the flag regex."""
+    nums = _letter_nums(s[:6000])
+    if len(nums) < 4:
+        return -9.0
+    return _fit(nums) / len(nums) + 2.0 * word_coverage(s)
+
+
+def looks_english(s):
+    nums = _letter_nums(s[:6000])
+    if len(nums) < 8:
+        return False
+    fit = _fit(nums) / len(nums)
+    cov = word_coverage(s)
+    if len(nums) < 40:  # few letters: chance matches are common, so demand clearly real words
+        return cov >= 0.6 and fit > -3.0
+    # calibrated: real English fit > -2.85 / coverage > 0.3; wrong-key output fit < -3.0 / coverage < 0.1
+    return (fit > -3.0 and cov >= 0.25) or (fit > -2.7 and cov >= 0.15)
+
+
 def vigenere_candidates(text):
-    """Used by auto-detect: common-key dictionary + statistical crack."""
+    """Used by auto-detect: flag-format crib + common-key dictionary + statistical crack.
+    Returns [(key, plaintext, strong)]."""
     n = sum(c in _LETTERS for c in text)
     out = []
+    if n >= 4:
+        out += vig_crib_candidates(text)
     if n >= 6:
-        out += [(k.upper(), vig_decrypt(text, k)) for k in COMMON_KEYS]
+        head = text[:2000]  # rank keys on a sample, decrypt the whole text only for the best few
+        ranked = []
+        for k in COMMON_KEYS:
+            ph = vig_decrypt(head, k)
+            strong = flag_bonus(ph) >= 1.5 and flag_bonus(head) < 1.5
+            ranked.append((vig_rank(ph, strong), k, strong))
+        ranked.sort(reverse=True)
+        for _, k, strong in ranked[:3]:
+            out.append((k.upper(), vig_decrypt(text, k), strong))
     if n >= 30:
         try:
-            key, plain = vigenere_crack(text, top=1)[0]
-            out.append((key, plain))
+            out += [(k, p, False) for k, p in vigenere_crack(text, top=2)]
         except DecodeError:
             pass
     return out
 
 
-def vig_rank(plain):
-    """Sort key for Vigenere guesses: readable score first, letter statistics as tie-break."""
-    nums = [ord(c.upper()) - 65 for c in plain if c in _LETTERS]
-    return (round(score(plain), 2), -_plain_chi(nums))
+def vig_rank(plain, strong=False):
+    """Sort key for Vigenere guesses (higher is better)."""
+    return eng_quality(plain) + (1.0 if strong else 0.0)
+
+
+def vig_crib_hint(text):
+    """For 'xxxx{...}' that is not a known prefix: what key start would make it a known one?"""
+    for prefix, off, tok in _crib_constraints(text):
+        if off != 0:
+            continue
+        frag = "".join(chr((ord(tok[i]) - ord(prefix[i])) % 26 + 65) for i in range(len(prefix)))
+        return (f"If '{tok.lower()}' is a Vigenere-encrypted '{prefix.lower()}', the key starts with "
+                f"'{frag}' (menu option 15, key input:  crib:{prefix.lower()})")
+    return None
+
+
+def vig_hint(text):
+    """If the letter statistics look polyalphabetic, return a hint string for identify()."""
+    nums = _letter_nums(text)
+    n = len(nums)
+    compact = re.sub(r"\s", "", text)
+    if n < 25 or n / max(1, len(compact)) < 0.7:
+        return None
+    if looks_english(text):
+        return None  # already readable (e.g. a pangram has flat letter statistics but is plain)
+    ic = _ioc([nums])
+    if ic >= 0.056:
+        return None  # English-like letter statistics: plain text or a monoalphabetic cipher
+    guess = ""
+    cols = {L: _ioc([nums[i::L] for i in range(L)]) for L in range(2, min(16, n // 8) + 1)}
+    if cols:
+        top = max(cols.values())
+        if top >= 0.052:
+            L = next(L for L in sorted(cols) if cols[L] >= 0.92 * top)
+            guess = f"; estimated key length ~{L}"
+    return (f"Letter statistics are flattened (IoC {ic:.3f}; English ~0.066, random ~0.038) - "
+            f"looks polyalphabetic, likely Vigenere{guess}")
 
 
 def run_vig_crack(text):
+    shown_keys = set()
+    cribs = vig_crib_candidates(text)
+    if cribs:
+        ok("Flag-format crib (assuming the prefix before '{' is a known flag prefix):")
+        for k, o, _strong in cribs[:4]:
+            shown_keys.add(k)
+            shown = o if len(o) <= 200 else o[:200] + "..."
+            print(f"  key {col('b', k)}: {shown}")
+        print()
     hits = [(k, o) for k, o in ((k.upper(), vig_decrypt(text, k)) for k in COMMON_KEYS)
-            if has_words(o) and score(o) >= 1.2]
+            if k not in shown_keys and looks_english(o)]
     if hits:
         ok("Common-key dictionary matches:")
         for k, o in hits[:3]:
             print(f"  key {k}: {o}")
         print()
     results = vigenere_crack(text)
-    ok("Statistical crack (Index of Coincidence + frequency analysis):")
+    ok("Statistical crack (Index of Coincidence + frequency + n-gram refinement):")
     for key, plain in results:
-        flag = col("y", " [FLAG]") if FLAG_RE.search(plain) else ""
+        flag = col("y", " [FLAG]") if flag_bonus(plain) >= 1.5 else ""
         shown = plain if len(plain) <= 200 else plain[:200] + "..."
-        print(f"  key {col('b', key)} (len {len(key)}, score {score(plain):.2f}){flag}")
+        tag = "" if looks_english(plain) else col("r", " (does not read as English - probably wrong)")
+        print(f"  key {col('b', key)} (len {len(key)}, score {score(plain):.2f}){flag}{tag}")
         print(f"    {shown}")
     info("Tip: short texts (<50 letters) give unreliable keys. If you know the "
          "start of the plaintext, use  crib:flag  as the key input.")
@@ -456,6 +702,14 @@ STRICT = [
 LOOSE = [("ROT13", d_rot13), ("Atbash", d_atbash), ("Reverse", d_reverse)]
 
 
+def _xor_plausible(t):
+    """Single-byte XOR only makes sense for hex-encoded bytes or raw non-text bytes."""
+    s = re.sub(r"(0x|\\x|\s|,|:)", "", t, flags=re.I)
+    if s and len(s) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        return True
+    return any(c not in string.printable for c in t)
+
+
 def auto_detect(text, max_depth=6):
     """Return a list of (score, chain, output) sorted best first."""
     results, seen = [], {text}
@@ -488,14 +742,16 @@ def auto_detect(text, max_depth=6):
             k, best = max(((k, s) for k, s in caesar_all(t) if k != 26),
                           key=lambda x: score(x[1]))
             cands.append((f"Caesar(+{k})", best))
-            _, xk, xo = xor_brute(get_bytes(t))[0]
-            cands.append((f"XOR(0x{xk:02x})", xo))
+            if _xor_plausible(t):  # XOR-ing ordinary letters only produces noise
+                _, xk, xo = xor_brute(get_bytes(t))[0]
+                cands.append((f"XOR(0x{xk:02x})", xo))
         except DecodeError:
             pass
+        vig = None
         vc = vigenere_candidates(t)
         if vc:  # keep only the best Vigenere guess so partial-key junk does not clutter results
-            vk, vo = max(vc, key=lambda kv: vig_rank(kv[1]))
-            cands.append((f"Vigenere({vk})", vo))
+            vk, vo, vs = max(vc, key=lambda kv: vig_rank(kv[1], kv[2]))
+            vig = (f"Vigenere({vk})", vo, vs)
         cur = score(t)
         if cur >= 1.2 and has_common_words(t) and common_ratio(t) >= 0.3:
             return  # already readable plaintext - no need to try ciphers
@@ -508,6 +764,13 @@ def auto_detect(text, max_depth=6):
                 seen.add(out)
                 c = chain + [name]
                 results.append((sc, c, out))
+                walk(out, c, depth + 1)
+        if vig and vig[1] not in seen:
+            name, out, strong = vig  # strong = dictionary key that yields a known flag prefix
+            if (looks_english(out) or strong) and vig_rank(out, strong) > vig_rank(t) + 0.3:
+                seen.add(out)
+                c = chain + [name]
+                results.append((score(out), c, out))
                 walk(out, c, depth + 1)
 
     walk(text, [], 1)
@@ -602,19 +865,27 @@ def identify(text):
     if re.search(r"%[0-9A-Fa-f]{2}", t):
         found.append("URL-encoded (percent-encoding)")
     compact = re.sub(r"\s+", "", t)
-    is_b32 = bool(one_line and len(compact) >= 8 and re.fullmatch(r"[A-Z2-7]+=*", compact)
+    no_blank = not re.search(r"[ \t]", t)  # Base32/64 never contain spaces (line wraps are fine)
+    is_b32 = bool(no_blank and one_line and len(compact) >= 8 and re.fullmatch(r"[A-Z2-7]+=*", compact)
                   and (compact.endswith("=") or len(compact) % 8 == 0))
     if is_b32:
         found.append("Base32" + (" (has = padding)" if "=" in compact else ""))
-    if not is_b32 and len(compact) >= 4 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", compact) and len(compact) % 4 == 0 \
+    if no_blank and not is_b32 and len(compact) >= 4 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", compact) and len(compact) % 4 == 0 \
             and not re.fullmatch(r"[0-9a-fA-F]+", compact) and not re.fullmatch(r"\d+", compact):
         strong = "=" in compact or (len(compact) >= 16 and re.search(r"[A-Z]", compact)
                                     and re.search(r"[a-z]", compact))
-        if strong or not has_common_words(compact):
-            found.append("Base64" + (" (likely)" if strong else " (possible)"))
-    elif not found and len(compact) >= 8 and re.fullmatch(r"[A-Za-z0-9_\-]+", compact) and ("-" in compact or "_" in compact) \
-            and not re.fullmatch(r"[A-Za-z0-9_]*[a-z]+(_[a-z0-9]+)+", compact):
-        found.append("Base64URL (possible)")
+        if strong:  # weak "(possible)" guesses were mostly false alarms, so they are not reported
+            found.append("Base64 (likely)")
+
+    # --- Vigenere hints ---
+    if found and found[0].startswith("Flag-like pattern, but prefix"):
+        crib = vig_crib_hint(t)
+        if crib:
+            found.append(crib)
+    if not any(w in f for f in found for w in ("Base", "Hex", "hash", "Binary", "decimal", "Morse", "PEM", "JWT", "bcrypt")):
+        hint = vig_hint(t)
+        if hint:
+            found.append(hint)
 
     # --- plain text classification ---
     letters = sum(c.isalpha() for c in t)
