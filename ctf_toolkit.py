@@ -18,6 +18,7 @@ import re
 import string
 import sys
 import urllib.parse
+from collections import Counter
 
 # ---------------------------------------------------------------- colors
 if os.name == "nt":
@@ -112,6 +113,13 @@ def score(s):
 def has_common_words(s):
     toks = re.findall(r"[a-z]+", s.lower())
     return any(t in COMMON_WORDS and len(t) > 2 for t in toks)
+
+
+def common_ratio(s):
+    toks = [t for t in re.findall(r"[a-z]+", s.lower()) if len(t) > 2]
+    if not toks:
+        return 0.0
+    return sum(t in COMMON_WORDS for t in toks) / len(toks)
 
 
 def has_words(s):
@@ -251,6 +259,194 @@ def xor_brute(data):
     return res
 
 
+# ---------------------------------------------------------------- vigenere
+ENG_FREQ = [8.167, 1.492, 2.782, 4.253, 12.702, 2.228, 2.015, 6.094, 6.966,
+            0.153, 0.772, 4.025, 2.406, 6.749, 7.507, 1.929, 0.095, 5.987,
+            6.327, 9.056, 2.758, 0.978, 2.360, 0.150, 1.974, 0.074]
+COMMON_KEYS = ["key", "secret", "flag", "ctf", "password", "crypto", "admin",
+               "vigenere", "lemon", "cipher", "test", "hello", "pass", "root",
+               "hack", "hacker", "code", "enigma", "love", "abc", "a", "b"]
+_LETTERS = set(string.ascii_letters)
+
+
+def clean_key(key):
+    k = re.sub(r"[^A-Za-z]", "", key or "").upper()
+    if not k:
+        raise DecodeError("Key must contain at least one letter (A-Z).")
+    return k
+
+
+def vig_decrypt(text, key):
+    """Decrypt Vigenere. Non-letters are kept and do not advance the key."""
+    k = clean_key(key)
+    out, i = [], 0
+    for ch in text:
+        if ch in _LETTERS:
+            base = 65 if ch.isupper() else 97
+            out.append(chr((ord(ch) - base - (ord(k[i % len(k)]) - 65)) % 26 + base))
+            i += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _ioc(columns):
+    vals = []
+    for c in columns:
+        n = len(c)
+        if n < 2:
+            continue
+        cnt = Counter(c)
+        vals.append(sum(v * (v - 1) for v in cnt.values()) / (n * (n - 1)))
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _best_shift(column):
+    n, cnt = len(column), Counter(column)
+    best = None
+    for k in range(26):
+        chi = 0.0
+        for j in range(26):
+            exp = ENG_FREQ[j] / 100 * n
+            chi += (cnt.get((j + k) % 26, 0) - exp) ** 2 / exp
+        if best is None or chi < best[0]:
+            best = (chi, k)
+    return best[1]
+
+
+def _shortest_period(key):
+    for p in range(1, len(key) + 1):
+        if len(key) % p == 0 and key == key[:p] * (len(key) // p):
+            return key[:p]
+    return key
+
+
+def _plain_chi(nums):
+    """Letter-frequency chi-squared per letter vs English (lower = more English)."""
+    n = len(nums)
+    if not n:
+        return 1e9
+    cnt = Counter(nums)
+    return sum((cnt.get(j, 0) - ENG_FREQ[j] / 100 * n) ** 2 / (ENG_FREQ[j] / 100 * n)
+               for j in range(26)) / n
+
+
+def _vig_key_for_length(nums, L):
+    key = [_best_shift(nums[i::L]) for i in range(L)]
+    plain = [(nums[i] - key[i % L]) % 26 for i in range(len(nums))]
+    return "".join(chr(65 + k) for k in key), _plain_chi(plain)
+
+
+def vigenere_crack(text, max_len=16, top=3):
+    """Statistical attack (Index of Coincidence + frequency analysis).
+    Returns [(key, plaintext)] best first. Works best with 50+ letters."""
+    nums = [ord(c.upper()) - 65 for c in text if c in _LETTERS]
+    if len(nums) < 20:
+        raise DecodeError("Need at least ~20 letters to auto-crack Vigenere "
+                          "(50+ works much better). Use a known key or crib instead.")
+    max_len = max(1, min(max_len, len(nums) // 8))  # keep >= 8 letters per column
+    by_len = {}
+    for L in range(1, max_len + 1):
+        key, chi = _vig_key_for_length(nums, L)
+        by_len[L] = (key, chi, _ioc([nums[i::L] for i in range(L)]))
+    best_chi = min(v[1] for v in by_len.values())
+    best_ioc = max(v[2] for v in by_len.values())
+    order = []
+    # 1) smallest length whose plaintext is almost as English-like as the best one
+    order.append(next(L for L in sorted(by_len) if by_len[L][1] <= best_chi * 1.25 + 0.01))
+    # 2) smallest length whose IoC is close to the best IoC
+    order.append(next(L for L in sorted(by_len) if by_len[L][2] >= 0.9 * best_ioc))
+    # 3) remaining lengths by plaintext quality
+    order += sorted(by_len, key=lambda L: by_len[L][1])
+    results = []
+    for L in order:
+        key = _shortest_period(by_len[L][0])
+        if all(key != k for k, _ in results):
+            results.append((key, vig_decrypt(text, key)))
+        if len(results) >= top:
+            break
+    return results
+
+
+def vigenere_candidates(text):
+    """Used by auto-detect: common-key dictionary + statistical crack."""
+    n = sum(c in _LETTERS for c in text)
+    out = []
+    if n >= 6:
+        out += [(k.upper(), vig_decrypt(text, k)) for k in COMMON_KEYS]
+    if n >= 30:
+        try:
+            key, plain = vigenere_crack(text, top=1)[0]
+            out.append((key, plain))
+        except DecodeError:
+            pass
+    return out
+
+
+def vig_rank(plain):
+    """Sort key for Vigenere guesses: readable score first, letter statistics as tie-break."""
+    nums = [ord(c.upper()) - 65 for c in plain if c in _LETTERS]
+    return (round(score(plain), 2), -_plain_chi(nums))
+
+
+def run_vig_crack(text):
+    hits = [(k, o) for k, o in ((k.upper(), vig_decrypt(text, k)) for k in COMMON_KEYS)
+            if has_words(o) and score(o) >= 1.2]
+    if hits:
+        ok("Common-key dictionary matches:")
+        for k, o in hits[:3]:
+            print(f"  key {k}: {o}")
+        print()
+    results = vigenere_crack(text)
+    ok("Statistical crack (Index of Coincidence + frequency analysis):")
+    for key, plain in results:
+        flag = col("y", " [FLAG]") if FLAG_RE.search(plain) else ""
+        shown = plain if len(plain) <= 200 else plain[:200] + "..."
+        print(f"  key {col('b', key)} (len {len(key)}, score {score(plain):.2f}){flag}")
+        print(f"    {shown}")
+    info("Tip: short texts (<50 letters) give unreliable keys. If you know the "
+         "start of the plaintext, use  crib:flag  as the key input.")
+
+
+def run_crib(text, crib):
+    crib = clean_key(crib)
+    cipher = [c.upper() for c in text if c in _LETTERS]
+    if len(cipher) < len(crib):
+        raise DecodeError("Crib is longer than the ciphertext.")
+    frag = "".join(chr((ord(cipher[i]) - ord(crib[i])) % 26 + 65) for i in range(len(crib)))
+    ok(f"Key fragment (assuming '{crib}' is at the start of the plaintext): {col('b', frag)}")
+    shown = set()
+    for p in range(1, len(frag) + 1):
+        if all(frag[i] == frag[i % p] for i in range(len(frag))):
+            key = frag[:p]
+            if p < len(frag) and key in shown:
+                continue
+            shown.add(key)
+            note = "key repeats inside the fragment" if p < len(frag) else "full fragment (key may be longer)"
+            plain = vig_decrypt(text, key)
+            print(f"  key {col('b', key)} ({note}):")
+            print(f"    {plain if len(plain) <= 200 else plain[:200] + '...'}")
+            if p < len(frag):
+                break
+
+
+def run_vigenere(text):
+    require(text)
+    if not any(c in _LETTERS for c in text):
+        raise DecodeError("Vigenere needs at least one letter (A-Z) in the input.")
+    try:
+        key = input(col("c", "Key (Enter = auto-crack | crib:flag = derive key from known text): ")).strip()
+    except EOFError:
+        key = ""
+    print()
+    if key.lower().startswith("crib:"):
+        run_crib(text, key[5:])
+    elif key:
+        show_result(f"Vigenere (key={clean_key(key)})", vig_decrypt(text, key))
+    else:
+        run_vig_crack(text)
+
+
 # ---------------------------------------------------------------- auto detect
 STRICT = [
     ("Base64", d_base64), ("Base32", d_base32), ("Hex", d_hex),
@@ -296,8 +492,12 @@ def auto_detect(text, max_depth=6):
             cands.append((f"XOR(0x{xk:02x})", xo))
         except DecodeError:
             pass
+        vc = vigenere_candidates(t)
+        if vc:  # keep only the best Vigenere guess so partial-key junk does not clutter results
+            vk, vo = max(vc, key=lambda kv: vig_rank(kv[1]))
+            cands.append((f"Vigenere({vk})", vo))
         cur = score(t)
-        if cur >= 1.2 and has_common_words(t):
+        if cur >= 1.2 and has_common_words(t) and common_ratio(t) >= 0.3:
             return  # already readable plaintext - no need to try ciphers
         for name, out in cands:
             if out in seen:
@@ -315,6 +515,132 @@ def auto_detect(text, max_depth=6):
     return results
 
 
+# ---------------------------------------------------------------- identify
+HASH_LENGTHS = {
+    32: "MD5 / NTLM / MD4", 40: "SHA-1", 56: "SHA-224 / SHA3-224",
+    64: "SHA-256 / SHA3-256", 96: "SHA-384", 128: "SHA-512 / SHA3-512",
+}
+
+
+def identify(text):
+    """Guess what kind of string this is. Returns a list of descriptions."""
+    t = text.strip()
+    found = []
+    if not t:
+        return found
+    one_line = "\n" not in t
+
+    # --- specific formats ---
+    m = FLAG_RE.search(t)
+    if m:
+        prefix = m.group(0).split("{")[0]
+        if re.fullmatch(r"(?i)(flag|ctf|htb|thm|picoctf|ctfd|hackthebox|cyber\w*|\w*ctf)", prefix):
+            found.append("CTF flag format (prefix{...})")
+        else:
+            found.append(f"Flag-like pattern, but prefix '{prefix}' is not a known flag prefix "
+                         "- content may be encoded (try ROT13 / Caesar / Atbash / Vigenere)")
+    if re.match(r"-----BEGIN [A-Z ]+-----", t):
+        found.append("PEM block (key / certificate / encoded data)")
+    if re.fullmatch(r"https?://\S+", t):
+        found.append("URL")
+    if re.fullmatch(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", t):
+        found.append("Email address")
+    if re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", t):
+        found.append("IPv4 address")
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", t):
+        found.append("UUID")
+    if re.fullmatch(r"\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}", t):
+        found.append("bcrypt hash (cannot be decoded - crack with hashcat/john)")
+    elif re.match(r"\$(1|5|6|y|argon2\w*)\$", t):
+        found.append("Unix crypt / Argon2 hash (cannot be decoded - crack with hashcat/john)")
+    if re.fullmatch(r"[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]*", t):
+        try:
+            head = t.split(".")[0]
+            head += "=" * (-len(head) % 4)
+            if b'"alg"' in base64.urlsafe_b64decode(head):
+                found.append("JWT (JSON Web Token) - decode header/payload as Base64URL")
+        except Exception:
+            pass
+
+    # --- hex / hashes ---
+    hex_clean = re.sub(r"(0x|\\x|\s|,|:)", "", t, flags=re.I)
+    if re.fullmatch(r"[0-9a-fA-F]+", hex_clean) and not re.fullmatch(r"\d+", hex_clean):
+        n = len(hex_clean)
+        if n in HASH_LENGTHS and re.fullmatch(r"[0-9a-fA-F]+", t):
+            found.append(f"Hex string, {n} chars - could be a {HASH_LENGTHS[n]} hash "
+                         "(hashes cannot be decoded) or hex-encoded data")
+        elif n % 2 == 0:
+            found.append(f"Hexadecimal data ({n // 2} bytes)")
+        else:
+            found.append("Hex characters but odd length (possibly broken hex)")
+
+    # --- binary / decimal ---
+    bin_clean = re.sub(r"[\s,]", "", t)
+    if re.fullmatch(r"[01]+", bin_clean) and len(bin_clean) >= 8:
+        if len(bin_clean) % 8 == 0:
+            found.append(f"Binary ({len(bin_clean) // 8} bytes)")
+        else:
+            found.append(f"Binary digits, but length {len(bin_clean)} is not a multiple of 8")
+    parts = [p for p in re.split(r"[\s,;]+", t) if p]
+    if len(parts) > 1 and all(p.isdigit() for p in parts) and not re.fullmatch(r"[01]+", bin_clean):
+        nums = [int(p) for p in parts]
+        if all(n <= 255 for n in nums):
+            found.append(f"ASCII decimal codes ({len(nums)} values)")
+        else:
+            found.append("List of integers (values > 255: maybe RSA numbers / coordinates / custom cipher)")
+    elif len(parts) == 1 and t.isdigit():
+        if len(t) in (9, 10):
+            found.append("Number - possible Unix timestamp")
+        elif len(t) > 30:
+            found.append(f"Very large integer ({len(t)} digits) - maybe RSA n / c / big number")
+        else:
+            found.append("Plain number")
+
+    # --- morse / url / base32 / base64 ---
+    if re.fullmatch(r"[.\-_/|\s]+", t) and re.search(r"[.\-]", t):
+        found.append("Morse code")
+    if re.search(r"%[0-9A-Fa-f]{2}", t):
+        found.append("URL-encoded (percent-encoding)")
+    compact = re.sub(r"\s+", "", t)
+    is_b32 = bool(one_line and len(compact) >= 8 and re.fullmatch(r"[A-Z2-7]+=*", compact)
+                  and (compact.endswith("=") or len(compact) % 8 == 0))
+    if is_b32:
+        found.append("Base32" + (" (has = padding)" if "=" in compact else ""))
+    if not is_b32 and len(compact) >= 4 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", compact) and len(compact) % 4 == 0 \
+            and not re.fullmatch(r"[0-9a-fA-F]+", compact) and not re.fullmatch(r"\d+", compact):
+        strong = "=" in compact or (len(compact) >= 16 and re.search(r"[A-Z]", compact)
+                                    and re.search(r"[a-z]", compact))
+        if strong or not has_common_words(compact):
+            found.append("Base64" + (" (likely)" if strong else " (possible)"))
+    elif not found and len(compact) >= 8 and re.fullmatch(r"[A-Za-z0-9_\-]+", compact) and ("-" in compact or "_" in compact) \
+            and not re.fullmatch(r"[A-Za-z0-9_]*[a-z]+(_[a-z0-9]+)+", compact):
+        found.append("Base64URL (possible)")
+
+    # --- plain text classification ---
+    letters = sum(c.isalpha() for c in t)
+    if letters >= 4 and not found:
+        if has_common_words(t) and score(t) >= 1.0:
+            found.append("Readable English text (already plain)")
+        elif has_common_words(t[::-1]):
+            found.append("Possibly reversed text")
+        elif letters / len(t) > 0.6:
+            found.append("Letters only - possible Caesar / ROT13 / Atbash / Vigenere / substitution cipher")
+    if not found:
+        found.append("Unknown / unrecognized format")
+    return found
+
+
+def print_types(types):
+    info("Detected type:")
+    for ty in types:
+        print(f"    - {ty}")
+    print()
+
+
+def run_identify(text):
+    print_types(identify(require(text)))
+
+
 # ---------------------------------------------------------------- UI
 def show_result(label, out):
     ok(f"{label} result:")
@@ -326,7 +652,11 @@ def show_result(label, out):
 
 def run_auto(text):
     require(text)
+    print_types(identify(text))
     results = auto_detect(text)
+    if not results and has_common_words(text) and score(text) >= 1.0:
+        ok("Input already looks like readable plaintext - nothing to decode.")
+        return
     if not results:
         err("No clear decoding found. Type :m to try the individual tools "
             "(Caesar / XOR brute force) manually.")
@@ -416,6 +746,8 @@ MENU = [
     ("Single-byte XOR Brute Force", run_xor),
     ("String Reverse", lambda t: show_result("Reverse", d_reverse(t))),
     ("ASCII Decimal Decode", lambda t: show_result("ASCII Decimal", d_decimal(t))),
+    ("Identify String Type", run_identify),
+    ("Vigenere Cipher (key / auto-crack / crib)", run_vigenere),
 ]
 
 
