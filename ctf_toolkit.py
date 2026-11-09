@@ -961,6 +961,77 @@ def run_xor(text):
         print(f"key 0x{k:02x} ({k:>3})  score {sc:.2f}  {shown[:80]}{flag}")
 
 
+# ------------------------------------------------ hex / XOR / reverse decoder
+def parse_xor_key(key_input):
+    """Hex key text (e.g. '0x41', '41 42', '4142') -> bytes."""
+    if key_input is None or not key_input.strip():
+        raise DecodeError("Empty XOR key. Enter a hex key such as 0x41 or 4142.")
+    cleaned = re.sub(r"(0x|\\x|[\s,:])", "", key_input, flags=re.I)
+    if not cleaned:
+        raise DecodeError("Empty XOR key after cleaning.")
+    if not re.fullmatch(r"[0-9a-fA-F]+", cleaned):
+        raise DecodeError("XOR key contains non-hex characters (allowed: 0-9 a-f, 0x, spaces, commas).")
+    if len(cleaned) % 2:
+        raise DecodeError(f"XOR key has an odd number of hex digits ({len(cleaned)}).")
+    return bytes.fromhex(cleaned)
+
+
+def parse_hex_data(hex_input):
+    """Pasted encrypted HEX ('0x41, 0x42' or '4142') -> bytes."""
+    require(hex_input)
+    values = re.findall(r"0x([0-9a-fA-F]{1,2})", hex_input, flags=re.I)
+    if values:
+        return bytes(int(x, 16) for x in values)
+    cleaned = re.sub(r"[^0-9a-fA-F]", "", hex_input)
+    if not cleaned:
+        raise DecodeError("No valid HEX characters found in the input.")
+    if len(cleaned) % 2:
+        raise DecodeError(f"Invalid HEX length ({len(cleaned)} digits, must be even).")
+    return bytes.fromhex(cleaned)
+
+
+def xor_repeating(data, key):
+    """Repeating-key XOR."""
+    if not key:
+        raise DecodeError("Empty XOR key.")
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+def run_hex_xor_reverse(_text=None):
+    """Asks for the hex key first, then the encrypted hex values."""
+    try:
+        key_input = input(col("c", "[?] Enter XOR key (hex): "))
+    except EOFError:
+        raise DecodeError("No XOR key entered.")
+    key = parse_xor_key(key_input)
+
+    hex_input = read_input("[?] Paste encrypted HEX values (or @filename): ")
+    if hex_input is None:  # empty / unreadable file / cancelled (already reported)
+        return
+    data = parse_hex_data(hex_input)
+
+    xor_result = xor_repeating(data, key)
+    reversed_result = xor_result[::-1]
+
+    def view(b):
+        return b.decode("utf-8", errors="replace")
+
+    info(f"{len(data)} byte(s) of data, {len(key)}-byte key")
+    ok("[1] XOR result:")
+    print(view(xor_result))
+    ok("[2] Reversed result:")
+    print(view(reversed_result))
+    ok("[3] Hex output:")
+    print(reversed_result.hex())
+    for label, b in (("XOR", xor_result), ("Reversed", reversed_result)):
+        m = FLAG_RE.search(view(b))
+        if m:
+            print(col("y", f"\n[FLAG] ({label}) {m.group(0)}"))
+
+
+run_hex_xor_reverse.interactive = True
+
+
 def read_input(prompt="Input (or @filename to read a file): "):
     """Returns the entered text, or None if cancelled / unreadable."""
     try:
@@ -1019,6 +1090,7 @@ MENU = [
     ("ASCII Decimal Decode", lambda t: show_result("ASCII Decimal", d_decimal(t))),
     ("Identify String Type", run_identify),
     ("Vigenere Cipher (key / auto-crack / crib)", run_vigenere),
+    ("Hex -> XOR (key) -> Reverse Decoder", run_hex_xor_reverse),
 ]
 
 
@@ -1080,20 +1152,31 @@ def manual_menu():
             err(f"Invalid option. Enter a number from 0 to {len(MENU)}.")
             continue
         name, func = MENU[int(choice) - 1]
-        try:
-            text = read_input()
-        except KeyboardInterrupt:
-            print()
-            info("Cancelled.")
-            continue
-        if text is None:
-            continue
+        if getattr(func, "interactive", False):
+            text = None  # this tool asks for its own inputs
+        else:
+            try:
+                text = read_input()
+            except KeyboardInterrupt:
+                print()
+                info("Cancelled.")
+                continue
+            if text is None:
+                continue
         print()
         try:
             run_tool(func, text)
         except KeyboardInterrupt:
             print()
             info("Cancelled.")
+        # keep the result on screen until the user decides where to go next
+        try:
+            nxt = input(col("c", "\n[Enter] = back to menu   [0] = back to home > ")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if nxt in ("0", "q", "b", "back", "home", "exit"):
+            break
 
 
 QUICK_HELP = ("Paste or type any text and it is decoded automatically.\n"
